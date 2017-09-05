@@ -221,8 +221,9 @@ const (
 )
 
 func shellEscapeStr(s string, seq int) string {
-    return fmt.Sprintf("\033[%dm%s\033[0m", seq, s)
+    return fmt.Sprintf("\033[%0dm%s\033[0m", seq, s)
 }
+
 
 func colorFile(fPath string, mode os.FileMode) string {
 	// socket
@@ -275,6 +276,168 @@ func classifyFile(fPath string, mode os.FileMode) string {
 
 	return fPath
 }
+
+
+type LsFileInfo struct {
+    name        string // filename
+    path        string // full file path
+
+    permissions string // permissions string (unix style)
+    group       string // file group
+    owner       string // file owner
+
+    inode       string // inode count
+    nLink       string // link count
+
+    size        string // file size
+
+    fileInfo    *os.FileInfo // pointer to FileInfo struct
+}
+
+func getLsFileInfo(fPath string, fileInfo *os.FileInfo, flags Flags) (LsFileInfo, error) {
+    var lfi LsFileInfo
+
+	// do not print if the -a flag is NOT specified and the
+	// file starts with a . (dot) or ends with a ~ (tilda)
+	if !flags.all {
+		if strings.HasPrefix((*fileInfo).Name(), ".") || strings.HasSuffix((*fileInfo).Name(), "~") {
+			return lfi, errors.New("")
+		}
+	}
+
+	// do not print '.' and '..' the -A flag is specified (as opposed to -a),
+	// as it sets the flags.hide_obvious to true)
+	if flags.hide_obvious {
+		if (*fileInfo).Name() == "." || (*fileInfo).Name() == ".." {
+			return lfi, errors.New("")
+		}
+	}
+
+	stat, ownername, groupname, _ := getFileStat(fPath, flags)
+	if flags.inode {
+		lfi.inode = strconv.FormatUint(uint64(stat.Ino), int(flags.base)) + flags.sep
+	}
+
+	if flags.permissions {
+		perm := (*fileInfo).Mode().String()
+		lfi.permissions = perm + flags.sep
+	}
+
+	// WARNING: unsafe
+	if flags.linkCount {
+		lfi.nLink = strconv.FormatUint(uint64(stat.Nlink), int(flags.base)) + flags.sep
+	}
+
+	if flags.owner {
+		lfi.owner = ownername + flags.sep
+	}
+
+	if flags.group {
+		lfi.group = groupname + flags.sep
+	}
+
+	if flags.size {
+		size := (*fileInfo).Size()
+		if flags.human {
+			// the 'size' field with will always be at most 4 characters
+			// wide + an extra character (K, M, G etc), if not considering
+			// the precision (according to sizeToHuman)
+			swidth := int(flags.precision + 4 + 1)
+
+            lfi.size = fmt.Sprintf("%*s", swidth,
+                sizeToHuman(size, flags.base, flags.precision))
+		} else {
+			lfi.size = fmt.Sprintf("%d", size)
+		}
+	}
+
+    lfi.path = fPath
+
+    // NOTICE: DOES NOT ADD COLORS!
+    lfi.name = (*fileInfo).Name()
+
+    lfi.fileInfo = fileInfo
+
+    return lfi, nil
+}
+
+type LsFieldWidth struct {
+    name        int // filename
+    path        int // full file path
+
+    permissions int // permissions string (unix style)
+    group       int // file group
+    owner       int // file owner
+
+    inode       int // inode count
+    nLink       int // link count
+
+    size        int // file size
+
+    fileInfo    *os.FileInfo // pointer to FileInfo struct
+}
+
+func getLsFieldWidth(infov []LsFileInfo) (LsFieldWidth) {
+    var lfw LsFieldWidth
+
+    max := func(x int, y int) int {
+        if x > y {
+            return x
+        }else {
+            return y
+        }
+    }
+
+    for _, info := range infov {
+        lfw.name = max(lfw.name, len(info.name))
+        lfw.path = max(lfw.path, len(info.path))
+        lfw.permissions = max(lfw.permissions, len(info.permissions))
+        lfw.group = max(lfw.group, len(info.group))
+        lfw.owner = max(lfw.owner, len(info.owner))
+        lfw.inode = max(lfw.inode, len(info.inode))
+        lfw.nLink = max(lfw.nLink, len(info.nLink))
+        lfw.size = max(lfw.size, len(info.size))
+    }
+    return lfw
+}
+
+func compileLsString(lfi LsFileInfo, lfw LsFieldWidth, flags Flags) (string, error) {
+    var fields []string
+
+    if lfi.inode != "" {
+        fields = append(fields, fmt.Sprintf("%*s", lfw.inode, lfi.inode))
+    }
+
+    if lfi.nLink != "" {
+        fields = append(fields, fmt.Sprintf("%*s", lfw.nLink, lfi.nLink))
+    }
+
+    if lfi.permissions != "" {
+        fields = append(fields, fmt.Sprintf("%-*s", lfw.permissions, lfi.permissions))
+    }
+
+    if lfi.owner != "" {
+        fields = append(fields, fmt.Sprintf("%-*s", lfw.owner, lfi.owner))
+    }
+
+    if lfi.group != "" {
+        fields = append(fields, fmt.Sprintf("%-*s", lfw.group, lfi.group))
+    }
+
+    if lfi.size != "" {
+        fields = append(fields, fmt.Sprintf("%*s", lfw.size, lfi.size))
+    }
+
+    // Commented to disable adding name at this point.
+//    if lfi.name != "" {
+//        fields = append(fields, fmt.Sprintf("%-*s", lfw.name, lfi.name))
+//    }
+
+    s := strings.Join(fields, flags.sep)
+
+    return s, nil
+}
+
 
 // Prints information about a file to standard output
 // output according to flags
@@ -501,8 +664,6 @@ const StringSeparators = " "
 func printDirEntriesAdv(fPath string, dir []os.FileInfo, flags Flags) bool {
 	// sort directory listing
 	dir = sortDirs(dir, flags)
-	var entries []string
-	var dirs []string // list of sub-directories
 
 	cols, err := getTerminalWidth()
 
@@ -510,7 +671,7 @@ func printDirEntriesAdv(fPath string, dir []os.FileInfo, flags Flags) bool {
 		cols = 80 // default
 	}
 
-	getEntry := func(path string, relative bool) (string, error) {
+	getEntry := func(path string, relative bool) (LsFileInfo, error) {
 		var cPath string
 
 		if filepath.IsAbs(path) || relative {
@@ -521,27 +682,17 @@ func printDirEntriesAdv(fPath string, dir []os.FileInfo, flags Flags) bool {
 
 		info, err := os.Stat(cPath)
 		if err != nil {
-			return "", err
+            var lfi LsFileInfo
+			return lfi, err
 		}
 
-		// info, err := getFileInfo(cPath, &file, flags)
-		entry, err := getFileInfo(cPath, &info, flags)
+		return getLsFileInfo(cPath, &info, flags)
+    }
 
-		if err != nil {
-			return "", err
-		}
+	var entries []LsFileInfo
+	var dirs []LsFileInfo // list of sub-directories
 
-		// if strings.ContainsAny(cPath, StringSeparators) {
-		// 	ns := []string{"'", cPath, "'"}
-		// 	cPath = strings.Join(ns, "")
-		// }
-
-		//entries = append(entries, entry)
-		return entry, nil
-	}
-
-	// append '.' and '..' to paths
-    // TODO: handle error, fix this segment
+	// append '.' and '..' directories 
     if flags.all && !flags.hide_obvious {
         oldCDW, _ := os.Getwd()
         os.Chdir(fPath)
@@ -556,43 +707,47 @@ func printDirEntriesAdv(fPath string, dir []os.FileInfo, flags Flags) bool {
         os.Chdir(oldCDW)
     }
 
-	// append filepaths in directory
-	for _, info := range dir {
-		entry, err := getEntry(info.Name(), false)
+	for _, fileInfo := range dir {
+		entry, err := getEntry(fileInfo.Name(), false)
 		if err != nil {
             printError(err)
             continue
         }
 
         entries = append(entries, entry)
-        // append to list of directories
-        if info.IsDir() {
-            dirs = append(dirs, info.Name())
-        }
 
+        // append to list of directories
+        if fileInfo.IsDir() {
+            dirs = append(dirs, entry)
+        }
 	}
 
-	lMax, _, lSum := maxEntryWidth(entries)
+//    lfw := getLsFieldWidth(entries)
 
-	// print the list of files/directories in entries
-	//  do not bother pretty printing when max length is
-	//  longer than the screen width
-	//if lMax > cols || (lSum/len(entries) <= 1/2*lMax) {
-	//  printDirEntries(fPath, dir, flags)
-	// } else {
+//    var lsEntries []string
+//    for _, info := range entries {
+//        s, err := compileLsString(info, lfw, flags)
+//        if err != nil {
+//            continue
+//        }
+//        lsEntries = append(lsEntries, s)
+//    }
 
-    topCDW, _ := os.Getwd()
-    os.Chdir(fPath)
-    prettyPrintEntries(entries, flags, cols, lMax, lSum)
-    os.Chdir(topCDW)
-	//}
+//	lMax, _, lSum := maxEntryWidth(lsEntries)
+
+    //topCDW, _ := os.Getwd()
+    //os.Chdir(fPath)
+//    prettyPrintEntries(lsEntries, flags, cols, lMax, lSum)
+    //os.Chdir(topCDW)
+
+    prettyPrintEntriesAdv(entries, cols, flags)
 
     // recursively print for sub-directories
     if flags.recursive {
         topCDW, _ := os.Getwd()
         os.Chdir(fPath)
         for _, d := range dirs {
-            df, err := os.Open(d)
+            df, err := os.Open(d.path)
             defer df.Close()
             if err != nil {
                 printError(err)
@@ -605,8 +760,13 @@ func printDirEntriesAdv(fPath string, dir []os.FileInfo, flags Flags) bool {
                 continue
             }
 
-            fmt.Printf("\n%s:\n", d)
-            printDirEntriesAdv(d, dlist, flags)
+            if flags.colors {
+                fmt.Printf("\n%s:\n", colorFile(d.name, (*d.fileInfo).Mode()))
+            } else {
+                fmt.Printf("\n%s:\n", d.name)
+            }
+
+            printDirEntriesAdv(d.path, dlist, flags)
         }
         os.Chdir(topCDW)
     }
@@ -627,12 +787,89 @@ func maxEntryWidth(entries []string) (lMax, lMin, lSum int) {
 
 		if len < lMin {
 			lMin = len
-		} else if len > lMax {
+		}
+        if len > lMax {
 			lMax = len
 		}
 	}
 	return
 }
+
+func prettyPrintEntriesAdv(entries []LsFileInfo, cols int, flags Flags) bool {
+    lfw := getLsFieldWidth(entries)
+
+	if !flags.multi_column {
+		for _, entry := range entries {
+            lsInfo, _ := compileLsString(entry, lfw, flags)
+            var name string
+            if flags.colors {
+                name = colorFile(entry.name, (*entry.fileInfo).Mode())
+                if flags.classify {
+                    name = classifyFile(name, (*entry.fileInfo).Mode())
+                }
+            } else {
+                name = entry.name
+            }
+
+            if len(lsInfo) > 0 {
+                fmt.Printf("%s%s", lsInfo, flags.sep)
+            }
+            fmt.Printf("%s\n", name)
+		}
+	} else {
+        col := 0
+        row := 0
+
+        for _, entry := range entries {
+            lsInfo, _ := compileLsString(entry, lfw, flags)
+
+            var name string
+            if flags.colors {
+                name = colorFile(entry.name, (*entry.fileInfo).Mode())
+                if flags.classify {
+                    name = classifyFile(name, (*entry.fileInfo).Mode())
+                }
+            } else {
+                name = entry.name
+            }
+
+            length := len(lsInfo) + lfw.name
+            if len(lsInfo) > 0 {
+                length += len(flags.sep)
+            }
+            if len(name) > lfw.name {
+                length += len(name) - lfw.name
+            }
+
+            if col + length >= cols {
+                col = 0
+                row++
+                fmt.Println()
+            }
+
+            if col > 0 {
+                fmt.Print(flags.sep)
+            }
+
+            if len(lsInfo) > 0 {
+                fmt.Printf("%s%s", lsInfo, flags.sep)
+            }
+            fmt.Printf("%s", name)
+
+            for i := 0; i < lfw.name - len(entry.name); i++ {
+                fmt.Print(" ")
+            }
+
+            col += length
+        }
+
+        if col > 0 {
+            fmt.Println()
+        }
+    }
+	return true
+}
+
 
 func prettyPrintEntries(entries []string, flags Flags, cols int, lMax int, lSum int) bool {
 	// if lMax < cols || flags.multi_column {
@@ -644,9 +881,9 @@ func prettyPrintEntries(entries []string, flags Flags, cols int, lMax int, lSum 
         i := 0
 		for _, s := range entries {
             if i > 0 {
-                fmt.Printf(" ")
+                fmt.Printf(flags.sep)
             }
-            fmt.Printf("%s", s)
+            fmt.Printf("%*s", lMax, s)
             i++
 		}
         if i > 0 {
@@ -662,10 +899,10 @@ func prettyPrintEntries(entries []string, flags Flags, cols int, lMax int, lSum 
 // (as opposed to GNU's version of ´ls´ which sorts vertically)
 // (this is both because it is easier, and because I personally prefer it)
 func printByColumnWidth(entries []string, colWidth int, width int, flags Flags) bool {
+    fmt.Printf("|")
+
 	col := 0
 	row := 0
-
-    //fmt.Printf("colWidth: %d\n Width: %d\n", colWidth, width)
 
 	for _, s := range entries {
 
@@ -682,7 +919,8 @@ func printByColumnWidth(entries []string, colWidth int, width int, flags Flags) 
 			row++
 		}
 
-		fmt.Printf("%-*s", colWidth, s)
+		fmt.Printf("|%*s|", colWidth, s)
+		//fmt.Printf("|%s|", s)
 		col += colWidth + len(flags.sep)
 	}
 
@@ -728,6 +966,11 @@ func printDirEntries(fPath string, dir []os.FileInfo, flags Flags) bool {
 	}
 
 	// print files in directory
+
+    // store file info in a list, this is used to find
+    // the largest field lengths for better formatting
+    var infov []LsFileInfo
+
 	for _, file := range dir {
 		var cPath string
 
@@ -737,15 +980,28 @@ func printDirEntries(fPath string, dir []os.FileInfo, flags Flags) bool {
 			cPath = filepath.Join(fPath, file.Name())
 		}
 
-		info, err := getFileInfo(cPath, &file, flags)
+		info, err := getLsFileInfo(cPath, &file, flags)
 
 		if err != nil {
 			continue
 		}
 
-		printNext(info)
-		paths = append(paths, cPath)
+        infov = append(infov, info)
+        //lsStr, err := compilLsString(info)
+
+		//printNext(info)
+        //paths = append(paths, cPath)
 	}
+
+    lfw := getLsFieldWidth(infov)
+
+    for _, info := range infov {
+        s, err := compileLsString(info, lfw, flags)
+        if err != nil {
+            continue
+        }
+        printNext(s)
+    }
 
 	// recurse into all sub-directories if recursive mode is enabled
 	if flags.recursive {
@@ -807,8 +1063,7 @@ func parseArgs() Flags {
 	flags.sort = TypeAlphaSort // see notice at the top of the file
 	flags.interactive = isTerminal()
 	flags.multi_column = flags.interactive
-	flags.colors = flags.interactive
-	//flags.sep = "\t" // tab
+	//flags.colors = flags.interactive
 	flags.sep = "\t" // tab
     flags.recursive = false
 	//flags.sep = " " // space
