@@ -348,7 +348,8 @@ func getlsFileInfo(fPath string, fileInfo *os.FileInfo, flags flags) (lsFileInfo
 
 	// WARNING: unsafe
 	if flags.linkCount {
-		lfi.nLink = strconv.FormatUint(stat.Nlink, int(flags.base))
+		// stat.Nlink is implementation dependent, convert to uint64
+		lfi.nLink = strconv.FormatUint(uint64(stat.Nlink), int(flags.base))
 	}
 
 	if flags.owner {
