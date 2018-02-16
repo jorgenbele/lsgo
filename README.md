@@ -3,7 +3,7 @@ An attempt at writing the standard *ls* UNIX utility in Go.
 
 ## Installation
 ```
-go get jorgenbele/lsgo
+go get github.com/jorgenbele/lsgo
 ```
 
 ## Usage
