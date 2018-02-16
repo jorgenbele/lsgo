@@ -8,7 +8,7 @@ go get jorgenbele/lsgo
 
 ## Usage
 ```
-Usage: lsgo [-1acdfFgGhilmnpqRsStux] [file ...]
+Usage: lsgo [-1aAdfFgGhHilLmnopqrRsStux] [file ...]
 -a  list all files
 -A  list all files except . and ..
 -d  list information about the directory itself, not its contents
